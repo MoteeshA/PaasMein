@@ -7257,6 +7257,19 @@ Do not ask for any other information. Do not mention forms, fields, AI, or instr
       'phone': _answers['phone'] ?? '',
       'extras': _answers['extras'] ?? '',
     };
+    final menuPrices = _menuItems
+        .map(
+          (item) =>
+              double.tryParse(item.price.replaceAll(RegExp(r'[^0-9.]'), '')),
+        )
+        .whereType<double>()
+        .where((price) => price.isFinite && price >= 0)
+        .toList();
+    if (menuPrices.isNotEmpty) {
+      published['minPrice'] = menuPrices
+          .reduce((left, right) => left < right ? left : right)
+          .toString();
+    }
     if (!mounted) return;
     setState(() => _busy = false);
     if (widget.initialData == null || widget.initialData!.isEmpty) {
@@ -8798,18 +8811,40 @@ class CustomerItem {
   ].join(' ');
 }
 
+enum CustomerPriority { closest, cheapest, bestRated, fairSmallShops }
+
 class CustomerOrderIntent {
   final List<CustomerItem> items;
   final double? radiusKm;
   final double? budgetInr;
+  final CustomerPriority priority;
+  final bool openNowOnly;
   final String originalText;
 
   const CustomerOrderIntent({
     required this.items,
     this.radiusKm,
     this.budgetInr,
+    this.priority = CustomerPriority.closest,
+    this.openNowOnly = false,
     this.originalText = '',
   });
+
+  CustomerOrderIntent copyWith({
+    List<CustomerItem>? items,
+    double? radiusKm,
+    double? budgetInr,
+    CustomerPriority? priority,
+    bool? openNowOnly,
+    String? originalText,
+  }) => CustomerOrderIntent(
+    items: items ?? this.items,
+    radiusKm: radiusKm ?? this.radiusKm,
+    budgetInr: budgetInr ?? this.budgetInr,
+    priority: priority ?? this.priority,
+    openNowOnly: openNowOnly ?? this.openNowOnly,
+    originalText: originalText ?? this.originalText,
+  );
 
   static Future<CustomerOrderIntent> parse(String utterance) async {
     final reply = await VoiceService.chat(
@@ -9777,6 +9812,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
   String _greeting = 'What do you need today?';
   bool _busy = false;
   bool _listening = false;
+  bool _locationRequesting = false;
+  bool _locationUnavailable = false;
+  Future<bool>? _locationFuture;
   Position? _userLocation;
   late final AnimationController _bob;
   late final AnimationController _blink;
@@ -9817,6 +9855,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
     )..repeat();
     _scheduleBlink();
     unawaited(_initialize());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_ensureUserLocation(showMessage: false));
+    });
   }
 
   void _scheduleBlink() async {
@@ -9845,6 +9886,8 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
         'No sign-up needed',
         'Please enable location to find nearby shops.',
         'Turn on location services to find nearby shops.',
+        'Location is off. Enable it to find nearby shops.',
+        'Retry',
       ]),
       VoiceService.chat(
         systemPrompt:
@@ -9908,33 +9951,44 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
     if (_customerId.isEmpty) {
       _customerId = await StoreRepository.getOrCreateCustomerId();
     }
-    await VoiceService.speak(
-      text('Finding nearby shops…'),
-      language: widget.language,
-      cacheToDisk: true,
-    );
-    final intent = await CustomerOrderIntent.parse(request);
     if (!mounted) return;
     setState(() => _busy = false);
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => MarketMapScreen(
+        builder: (_) => NeedBuilderScreen(
           language: widget.language,
-          intent: intent,
           customerId: _customerId,
           userLocation: _userLocation!,
+          initialText: request,
         ),
       ),
     );
   }
 
-  Future<bool> _ensureUserLocation() async {
+  Future<bool> _ensureUserLocation({bool showMessage = true}) async {
     if (_userLocation != null) return true;
+    final pending = _locationFuture;
+    if (pending != null) return pending;
+    final request = _requestUserLocation(showMessage: showMessage);
+    _locationFuture = request;
+    try {
+      return await request;
+    } finally {
+      if (identical(_locationFuture, request)) _locationFuture = null;
+    }
+  }
+
+  Future<bool> _requestUserLocation({required bool showMessage}) async {
+    if (_userLocation != null) return true;
+    _locationRequesting = true;
     try {
       if (!await Geolocator.isLocationServiceEnabled()) {
-        _showLocationMessage(
-          text('Turn on location services to find nearby shops.'),
-        );
+        if (mounted) setState(() => _locationUnavailable = true);
+        if (showMessage) {
+          _showLocationMessage(
+            text('Turn on location services to find nearby shops.'),
+          );
+        }
         return false;
       }
       var permission = await Geolocator.checkPermission();
@@ -9943,9 +9997,12 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
       }
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        _showLocationMessage(
-          text('Please enable location to find nearby shops.'),
-        );
+        if (mounted) setState(() => _locationUnavailable = true);
+        if (showMessage) {
+          _showLocationMessage(
+            text('Please enable location to find nearby shops.'),
+          );
+        }
         return false;
       }
       final position = await Geolocator.getCurrentPosition(
@@ -9955,16 +10012,28 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
         ),
       );
       if (!mounted) return false;
-      setState(() => _userLocation = position);
+      setState(() {
+        _userLocation = position;
+        _locationUnavailable = false;
+      });
       return true;
     } catch (error) {
       debugPrint('Could not get customer location: $error');
       if (mounted) {
-        _showLocationMessage(
-          text('Please enable location to find nearby shops.'),
-        );
+        setState(() => _locationUnavailable = true);
+        if (showMessage) {
+          _showLocationMessage(
+            text('Please enable location to find nearby shops.'),
+          );
+        }
       }
       return false;
+    } finally {
+      if (mounted) {
+        setState(() => _locationRequesting = false);
+      } else {
+        _locationRequesting = false;
+      }
     }
   }
 
@@ -10121,6 +10190,51 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen>
                                 fontSize: 13,
                               ),
                             ),
+                            if (_locationUnavailable) ...[
+                              const SizedBox(height: 14),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF4D8),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.location_off_rounded,
+                                      color: PaytmColors.goldDeep,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        text(
+                                          'Location is off. Enable it to find nearby shops.',
+                                        ),
+                                        style: const TextStyle(
+                                          color: PaytmColors.deepNavy,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    TextButton(
+                                      onPressed: _locationRequesting
+                                          ? null
+                                          : () => unawaited(
+                                              _ensureUserLocation(
+                                                showMessage: true,
+                                              ),
+                                            ),
+                                      child: Text(text('Retry')),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 24),
                             Container(
                               decoration: BoxDecoration(
@@ -10259,6 +10373,562 @@ class _HomeRadarPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _HomeRadarPainter oldDelegate) =>
       oldDelegate.progress != progress;
+}
+
+class NeedBuilderScreen extends StatefulWidget {
+  final AppLanguage language;
+  final String customerId;
+  final Position userLocation;
+  final String initialText;
+
+  const NeedBuilderScreen({
+    super.key,
+    required this.language,
+    required this.customerId,
+    required this.userLocation,
+    required this.initialText,
+  });
+
+  @override
+  State<NeedBuilderScreen> createState() => _NeedBuilderScreenState();
+}
+
+class _NeedBuilderScreenState extends State<NeedBuilderScreen>
+    with TickerProviderStateMixin {
+  final TextEditingController _input = TextEditingController();
+  int _step = 0;
+  bool _busy = false;
+  bool _listening = false;
+  bool _openNowOnly = false;
+  List<CustomerItem> _items = [];
+  double? _budgetInr;
+  double _radiusKm = 2;
+  CustomerPriority _priority = CustomerPriority.closest;
+  late final AnimationController _bob;
+  late final AnimationController _blink;
+  late final AnimationController _mouth;
+  late final AnimationController _antenna;
+  late final AnimationController _pupil;
+  late final AnimationController _cardIn;
+
+  static const _titles = [
+    'What do you need?',
+    'Any budget in mind?',
+    'How far will you travel?',
+    'How should I rank shops?',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _input.text = widget.initialText;
+    _bob = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2600),
+    )..repeat(reverse: true);
+    _blink = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 140),
+    );
+    _mouth = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+    _antenna = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat(reverse: true);
+    _pupil = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 4000),
+    )..repeat();
+    _cardIn = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 360),
+    )..forward();
+    _scheduleBlink();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _speakStep());
+  }
+
+  void _scheduleBlink() async {
+    while (mounted) {
+      await Future.delayed(
+        Duration(milliseconds: 2200 + math.Random().nextInt(2200)),
+      );
+      if (!mounted) return;
+      await _blink.forward();
+      await _blink.reverse();
+    }
+  }
+
+  Future<void> _speakStep() async {
+    await VoiceService.speak(
+      _titles[_step],
+      language: widget.language,
+      cacheToDisk: true,
+    );
+  }
+
+  Future<void> _listen() async {
+    if (_busy || _listening) return;
+    setState(() => _listening = true);
+    final words = await VoiceService.recordAndTranscribe(
+      seconds: 6,
+      language: widget.language,
+    );
+    if (!mounted) return;
+    setState(() => _listening = false);
+    if (words == null || words.trim().isEmpty) return;
+    _input.text = words.trim();
+    if (_step == 3) _choosePriorityFromSpeech(words);
+  }
+
+  void _choosePriorityFromSpeech(String words) {
+    final lower = words.toLowerCase();
+    final priority = lower.contains('cheap') || lower.contains('budget')
+        ? CustomerPriority.cheapest
+        : lower.contains('rating') || lower.contains('best')
+        ? CustomerPriority.bestRated
+        : lower.contains('small') || lower.contains('fair')
+        ? CustomerPriority.fairSmallShops
+        : CustomerPriority.closest;
+    setState(() => _priority = priority);
+  }
+
+  Future<void> _continue() async {
+    if (_busy) return;
+    if (_step == 0) {
+      final request = _input.text.trim();
+      if (request.isEmpty) {
+        _notice('Tell Piku what you need first.');
+        return;
+      }
+      setState(() => _busy = true);
+      final parsed = await CustomerOrderIntent.parse(request);
+      if (!mounted) return;
+      setState(() {
+        _items = parsed.items.isEmpty
+            ? [CustomerItem(name: request)]
+            : parsed.items;
+        _budgetInr = parsed.budgetInr;
+        if (parsed.radiusKm != null && parsed.radiusKm! > 0) {
+          _radiusKm = parsed.radiusKm!.clamp(.2, 25).toDouble();
+        }
+        _busy = false;
+        _step = 1;
+        _input.clear();
+      });
+      _cardIn.forward(from: 0);
+      unawaited(_speakStep());
+      return;
+    }
+    if (_step == 1) {
+      final raw = _input.text.trim().replaceAll(',', '');
+      final amount = double.tryParse(raw.replaceAll(RegExp(r'[^0-9.]'), ''));
+      if (raw.isNotEmpty && amount == null) {
+        _notice('Enter a number, or choose No budget.');
+        return;
+      }
+      if (raw.isNotEmpty) _budgetInr = amount;
+    } else if (_step == 2 && _input.text.trim().isNotEmpty) {
+      final value = double.tryParse(
+        _input.text.trim().replaceAll(RegExp(r'[^0-9.]'), ''),
+      );
+      if (value == null || value <= 0) {
+        _notice('Enter a distance in kilometres.');
+        return;
+      }
+      _radiusKm = value.clamp(.2, 25).toDouble();
+    }
+    if (_step == 3) {
+      _finish();
+      return;
+    }
+    setState(() {
+      _step++;
+      _input.clear();
+    });
+    _cardIn.forward(from: 0);
+    unawaited(_speakStep());
+  }
+
+  void _finish() {
+    final intent = CustomerOrderIntent(
+      items: _items,
+      budgetInr: _budgetInr,
+      radiusKm: _radiusKm,
+      priority: _priority,
+      openNowOnly: _openNowOnly,
+      originalText: _items.map((item) => item.displayName).join(', '),
+    );
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => MarketMapScreen(
+          language: widget.language,
+          intent: intent,
+          customerId: widget.customerId,
+          userLocation: widget.userLocation,
+        ),
+      ),
+    );
+  }
+
+  void _notice(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Widget _choice(String label, bool selected, VoidCallback onTap) => ChoiceChip(
+    label: Text(label),
+    selected: selected,
+    onSelected: (_) => onTap(),
+    selectedColor: PaytmColors.gold,
+    backgroundColor: PaytmColors.iceBlue,
+    labelStyle: TextStyle(
+      color: PaytmColors.deepNavy,
+      fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+    ),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+  );
+
+  Widget _questionContent() {
+    switch (_step) {
+      case 0:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _input,
+              minLines: 1,
+              maxLines: 3,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _continue(),
+              decoration: const InputDecoration(
+                labelText: 'Items or service',
+                hintText: 'For example: rice and cooking oil',
+                prefixIcon: Icon(Icons.shopping_basket_outlined),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              children: [
+                _choice('Rice', false, () => _input.text = 'rice'),
+                _choice('Vegetables', false, () => _input.text = 'vegetables'),
+                _choice(
+                  'Tea and snacks',
+                  false,
+                  () => _input.text = 'tea and snacks',
+                ),
+              ],
+            ),
+          ],
+        );
+      case 1:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _input,
+              keyboardType: TextInputType.number,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: 'Maximum budget (₹)',
+                hintText: 'Optional',
+                prefixIcon: Icon(Icons.currency_rupee_rounded),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              children: [
+                _choice(
+                  'No budget',
+                  _budgetInr == null && _input.text.isEmpty,
+                  () {
+                    setState(() {
+                      _budgetInr = null;
+                      _input.clear();
+                    });
+                  },
+                ),
+                for (final amount in [100, 300, 500, 1000])
+                  _choice('₹$amount', _budgetInr == amount, () {
+                    setState(() {
+                      _budgetInr = amount.toDouble();
+                      _input.text = '$amount';
+                    });
+                  }),
+              ],
+            ),
+          ],
+        );
+      case 2:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _input,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: 'Maximum distance (km)',
+                hintText: 'Choose a radius or enter one',
+                prefixIcon: Icon(Icons.near_me_outlined),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final radius in [0.5, 1.0, 2.0, 5.0])
+                  _choice(
+                    '${radius.toStringAsFixed(radius % 1 == 0 ? 0 : 1)} km',
+                    _radiusKm == radius,
+                    () {
+                      setState(() {
+                        _radiusKm = radius;
+                        _input.text = '$radius';
+                      });
+                    },
+                  ),
+              ],
+            ),
+          ],
+        );
+      default:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                _choice(
+                  'Closest',
+                  _priority == CustomerPriority.closest,
+                  () => setState(() => _priority = CustomerPriority.closest),
+                ),
+                _choice(
+                  'Cheapest',
+                  _priority == CustomerPriority.cheapest,
+                  () => setState(() => _priority = CustomerPriority.cheapest),
+                ),
+                _choice(
+                  'Best rated',
+                  _priority == CustomerPriority.bestRated,
+                  () => setState(() => _priority = CustomerPriority.bestRated),
+                ),
+                _choice(
+                  'Support small shops',
+                  _priority == CustomerPriority.fairSmallShops,
+                  () => setState(
+                    () => _priority = CustomerPriority.fairSmallShops,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Only show shops open now'),
+              value: _openNowOnly,
+              onChanged: (value) => setState(() => _openNowOnly = value),
+            ),
+          ],
+        );
+    }
+  }
+
+  @override
+  void dispose() {
+    _input.dispose();
+    _bob.dispose();
+    _blink.dispose();
+    _mouth.dispose();
+    _antenna.dispose();
+    _pupil.dispose();
+    _cardIn.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: PaytmColors.inkTop,
+    body: Stack(
+      children: [
+        const Positioned.fill(child: _TreacleBackdrop()),
+        SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                child: Row(
+                  children: [
+                    _CircleIconButton(
+                      icon: Icons.arrow_back_rounded,
+                      onTap: () => Navigator.of(context).maybePop(),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${_step + 1} of 4',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ...List.generate(
+                      4,
+                      (index) => Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 2),
+                        width: index == _step ? 20 : 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: index <= _step
+                              ? PaytmColors.gold
+                              : Colors.white30,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(
+                height: 165,
+                child: AnimatedBuilder(
+                  animation: Listenable.merge([
+                    _bob,
+                    _blink,
+                    _mouth,
+                    _antenna,
+                    _pupil,
+                    VoiceService.speakingListenable,
+                  ]),
+                  builder: (context, _) => Transform.translate(
+                    offset: Offset(0, math.sin(_bob.value * math.pi * 2) * 5),
+                    child: Transform.scale(
+                      scale: .34,
+                      alignment: Alignment.topCenter,
+                      child: _PremiumRobot(
+                        blink: _blink.value,
+                        wave: 0,
+                        showWave: false,
+                        antennaPulse: _antenna.value,
+                        pupil: _pupil.value,
+                        expression: VoiceService.isSpeaking
+                            ? _RobotExpression.speaking
+                            : _RobotExpression.happy,
+                        mouthFlap: VoiceService.isSpeaking
+                            ? _speechMouthOpening(_mouth.value)
+                            : 0,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: AnimatedBuilder(
+                  animation: _cardIn,
+                  builder: (context, child) => Opacity(
+                    opacity: _cardIn.value,
+                    child: Transform.translate(
+                      offset: Offset(0, (1 - _cardIn.value) * 14),
+                      child: child,
+                    ),
+                  ),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                    child: Container(
+                      padding: const EdgeInsets.all(22),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(.97),
+                        borderRadius: BorderRadius.circular(30),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x33000000),
+                            blurRadius: 24,
+                            offset: Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            _titles[_step],
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: PaytmColors.deepNavy,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _step == 0
+                                ? 'Tell Piku what you are shopping for.'
+                                : 'A quick preference helps Piku find a better match.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: PaytmColors.deepNavy.withOpacity(.64),
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          _questionContent(),
+                          const SizedBox(height: 14),
+                          OutlinedButton.icon(
+                            onPressed: _busy || _listening ? null : _listen,
+                            icon: Icon(
+                              _listening ? Icons.graphic_eq : Icons.mic_rounded,
+                            ),
+                            label: Text(
+                              _listening ? 'Listening…' : 'Answer by voice',
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          FilledButton.icon(
+                            onPressed: _busy ? null : _continue,
+                            icon: _busy
+                                ? const SizedBox.square(
+                                    dimension: 17,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : Icon(
+                                    _step == 3
+                                        ? Icons.map_rounded
+                                        : Icons.arrow_forward_rounded,
+                                  ),
+                            label: Text(
+                              _step == 3 ? 'Show nearby shops' : 'Continue',
+                            ),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: PaytmColors.paytmBlue,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 15),
+                              textStyle: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class MarketMapScreen extends StatefulWidget {
@@ -10405,16 +11075,17 @@ class _MarketMapScreenState extends State<MarketMapScreen>
   void _refreshMapPositions() {
     _processShopLocations();
     final locatedStores = _stores.where(_hasMapLocation).toList();
-    final relevantStores = locatedStores.where(_matchesNeed).toList();
+    final eligibleStores = locatedStores.where(_withinUserFilters).toList();
+    final relevantStores = eligibleStores.where(_matchesNeed).toList();
     final fairPool = relevantStores.isNotEmpty
         ? relevantStores
         : widget.intent.items.isEmpty
-        ? locatedStores
+        ? eligibleStores
         : const <Map<String, dynamic>>[];
     final fairMatch = fairPool
         .where((shop) => shop['isFairMatchCandidate'] == true)
         .firstOrNull;
-    final proximityPool = fairPool.isNotEmpty ? fairPool : locatedStores;
+    final proximityPool = fairPool.isNotEmpty ? fairPool : eligibleStores;
     final shopAtCurrentLocation = proximityPool
         .where(
           (shop) => shop['distanceIsDemo'] != true && _distanceTo(shop) <= .1,
@@ -10425,7 +11096,7 @@ class _MarketMapScreenState extends State<MarketMapScreen>
         fairMatch ??
         (relevantStores.isNotEmpty
             ? relevantStores.first
-            : (locatedStores.isEmpty ? null : locatedStores.first));
+            : (eligibleStores.isEmpty ? null : eligibleStores.first));
     for (final shop in _stores) {
       shop['isFairMatch'] =
           identical(shop, priority) &&
@@ -10535,6 +11206,7 @@ class _MarketMapScreenState extends State<MarketMapScreen>
         'Distance unavailable',
         'Seller shops without saved GPS are not shown on this view.',
         'Fair match',
+        'Top pick',
         'Low recent orders',
         'No ratings yet',
         'Your private rating',
@@ -10569,6 +11241,10 @@ class _MarketMapScreenState extends State<MarketMapScreen>
         lng >= -180 &&
         lng <= 180;
   }
+
+  bool _withinUserFilters(Map<String, dynamic> shop) =>
+      _distanceTo(shop) <= (widget.intent.radiusKm ?? 2.0) &&
+      (!widget.intent.openNowOnly || _isOpenNow(shop));
 
   LatLng _pointFor(Map<String, dynamic> shop) => LatLng(
     (shop['latitude'] as num).toDouble(),
@@ -10624,15 +11300,59 @@ class _MarketMapScreenState extends State<MarketMapScreen>
           Geolocator.distanceBetween(userLat, userLng, lat, lng) / 1000;
       shop['distanceIsDemo'] = shop['demoSampleMetrics'] == true;
       shop['distanceKm'] = distanceKm;
+      shop['isFairMatchCandidate'] = _withinUserFilters(shop);
+    }
+
+    // Give a modest fairness nudge to a nearby small merchant competing with
+    // a substantially busier shop in the same category.
+    for (final shop in _stores) {
+      shop['competitorNearby'] = false;
+      if (!_hasMapLocation(shop)) continue;
+      final category = (shop['business_type'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase();
+      if (category.isEmpty) continue;
+      final shopOrders =
+          ((shop['ordersToday'] ?? shop['orders_today']) as num?)?.toDouble() ??
+          0;
+      for (final competitor in _stores) {
+        if (identical(shop, competitor) || !_hasMapLocation(competitor))
+          continue;
+        final competitorCategory = (competitor['business_type'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        if (category != competitorCategory) continue;
+        final competitorOrders =
+            ((competitor['ordersToday'] ?? competitor['orders_today']) as num?)
+                ?.toDouble() ??
+            0;
+        if (competitorOrders < math.max(5, shopOrders * 1.5)) continue;
+        final meters = Geolocator.distanceBetween(
+          (shop['latitude'] as num).toDouble(),
+          (shop['longitude'] as num).toDouble(),
+          (competitor['latitude'] as num).toDouble(),
+          (competitor['longitude'] as num).toDouble(),
+        );
+        if (meters <= 300) {
+          shop['competitorNearby'] = true;
+          break;
+        }
+      }
+    }
+
+    for (final shop in _stores) {
+      if (!_hasMapLocation(shop)) continue;
+      final distanceKm = _distanceTo(shop);
       final rating = (shop['rating'] as num?)?.toDouble();
       final ordersToday = (shop['ordersToday'] ?? shop['orders_today']) as num?;
-      shop['priorityScore'] = _calculateFairPriority(
+      shop['priorityScore'] = _calculatePriorityScore(
+        shop: shop,
         distanceKm: distanceKm,
         rating: rating,
         ordersToday: ordersToday?.toDouble(),
-        shopId: (shop['id'] ?? shop['business_name'] ?? '').toString(),
       );
-      shop['isFairMatchCandidate'] = distanceKm < 2.0;
     }
 
     _stores.sort((a, b) {
@@ -10652,14 +11372,15 @@ class _MarketMapScreenState extends State<MarketMapScreen>
     });
   }
 
-  double _calculateFairPriority({
+  double _calculatePriorityScore({
+    required Map<String, dynamic> shop,
     required double distanceKm,
     required double? rating,
     required double? ordersToday,
-    required String shopId,
   }) {
-    if (distanceKm >= 2.0) return 0;
-    final distanceScore = 1 - (distanceKm / 2.0);
+    final radiusKm = widget.intent.radiusKm ?? 2.0;
+    if (distanceKm > radiusKm || radiusKm <= 0) return 0;
+    final distanceScore = (1 - (distanceKm / radiusKm)).clamp(0.0, 1.0);
     // Missing reputation and order-volume data are neutral, never fabricated.
     final ratingScore = rating == null
         ? .6
@@ -10667,11 +11388,39 @@ class _MarketMapScreenState extends State<MarketMapScreen>
     final lowBusinessScore = ordersToday == null
         ? .5
         : (1 - (ordersToday / 50)).clamp(0.0, 1.0).toDouble();
+    final rawPrice = shop['minPrice'];
+    final minPrice = rawPrice is num
+        ? rawPrice.toDouble()
+        : double.tryParse(rawPrice?.toString() ?? '');
+    final budget = widget.intent.budgetInr;
+    final cheapScore = minPrice == null
+        ? .5
+        : budget == null || budget <= 0
+        ? (1 - (minPrice / 1000)).clamp(0.0, 1.0)
+        : (1 - (minPrice / budget).clamp(0.0, 1.0));
+    final weights = switch (widget.intent.priority) {
+      CustomerPriority.closest => const [0.60, 0.20, 0.10, 0.10],
+      CustomerPriority.cheapest => const [0.20, 0.20, 0.50, 0.10],
+      CustomerPriority.bestRated => const [0.20, 0.60, 0.10, 0.10],
+      CustomerPriority.fairSmallShops => const [0.25, 0.20, 0.10, 0.45],
+    };
+    var score =
+        distanceScore * weights[0] +
+        ratingScore * weights[1] +
+        cheapScore * weights[2] +
+        lowBusinessScore * weights[3];
+    if (widget.intent.priority == CustomerPriority.fairSmallShops &&
+        shop['competitorNearby'] == true) {
+      score += .15;
+    }
     final now = DateTime.now();
-    return (distanceScore * .38) +
-        (ratingScore * .3) +
-        (lowBusinessScore * .28) +
-        (_dailyTieBreak(shopId, now) * .04);
+    score +=
+        _dailyTieBreak(
+          (shop['id'] ?? shop['business_name'] ?? '').toString(),
+          now,
+        ) *
+        .03;
+    return score.clamp(0.0, 1.0).toDouble();
   }
 
   double _dailyTieBreak(String shopId, DateTime date) {
@@ -10687,10 +11436,33 @@ class _MarketMapScreenState extends State<MarketMapScreen>
     return (shop['distanceKm'] as num?)?.toDouble() ?? double.infinity;
   }
 
+  String _fmtKm(double? km) {
+    if (km == null || !km.isFinite) return '—';
+    return km < 1 ? '${(km * 1000).round()} m' : '${km.toStringAsFixed(1)} km';
+  }
+
+  Widget _miniBadge(String icon, String label) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+    decoration: BoxDecoration(
+      color: Colors.white.withOpacity(.92),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Text(
+      '$icon $label',
+      style: const TextStyle(
+        color: PaytmColors.deepNavy,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+      ),
+    ),
+  );
+
   List<Map<String, dynamic>> get _visibleStores {
     final query = _search.text.trim().toLowerCase();
-    if (query.isEmpty) return _stores;
     return _stores.where((shop) {
+      if (_distanceTo(shop) > (widget.intent.radiusKm ?? 2.0)) return false;
+      if (widget.intent.openNowOnly && !_isOpenNow(shop)) return false;
+      if (query.isEmpty) return true;
       final searchable = [
         shop['business_name'],
         shop['business_type'],
@@ -10700,6 +11472,37 @@ class _MarketMapScreenState extends State<MarketMapScreen>
       return searchable.contains(query) ||
           query.split(RegExp(r'\s+')).any(searchable.contains);
     }).toList();
+  }
+
+  bool _isOpenNow(Map<String, dynamic> shop) {
+    final hours = (shop['hours'] ?? '').toString().toLowerCase();
+    final match = RegExp(
+      r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:to|–|-)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)',
+    ).firstMatch(hours);
+    // Unknown hours stay visible; we only hide a shop when saved hours clearly
+    // describe a range that does not include the current local time.
+    if (match == null) return true;
+    int minutes(int hour, String? minute, String meridiem) {
+      var normalizedHour = hour % 12;
+      if (meridiem == 'pm') normalizedHour += 12;
+      return normalizedHour * 60 + int.parse(minute ?? '0');
+    }
+
+    final start = minutes(
+      int.parse(match.group(1)!),
+      match.group(2),
+      match.group(3)!,
+    );
+    final end = minutes(
+      int.parse(match.group(4)!),
+      match.group(5),
+      match.group(6)!,
+    );
+    final now = DateTime.now();
+    final current = now.hour * 60 + now.minute;
+    return end < start
+        ? current >= start || current <= end
+        : current >= start && current <= end;
   }
 
   bool _matchesNeed(Map<String, dynamic> shop) {
@@ -10947,8 +11750,8 @@ class _MarketMapScreenState extends State<MarketMapScreen>
         Marker(
           key: ValueKey('shop_pin_$id'),
           point: _pointFor(shop),
-          width: 190,
-          height: 170,
+          width: 165,
+          height: 108,
           alignment: Alignment.bottomCenter,
           child: _AnimatedShopPin(
             shop: shop,
@@ -10957,8 +11760,7 @@ class _MarketMapScreenState extends State<MarketMapScreen>
             isPriority: _priorityShop?['id'] == shop['id'],
             isFairMatch: shop['isFairMatch'] == true,
             fairMatchLabel: text('Fair match'),
-            sampleDataLabel: text('Sample data'),
-            ordersTodayLabel: text('orders today'),
+            topPickLabel: text('Top pick'),
             highlighted: _matchesNeed(shop),
             onTap: () => _showShop(shop),
           ),
@@ -10971,13 +11773,13 @@ class _MarketMapScreenState extends State<MarketMapScreen>
       final lat = (pikuShop['latitude'] as num).toDouble();
       final lng = (pikuShop['longitude'] as num).toDouble();
       final longitudeOffset =
-          .00018 / math.max(.15, math.cos(lat * math.pi / 180).abs());
+          .00025 / math.max(.15, math.cos(lat * math.pi / 180).abs());
       markers.add(
         Marker(
           key: const ValueKey('piku_map_marker'),
-          point: LatLng(lat + .00018, lng + longitudeOffset),
-          width: 120,
-          height: 150,
+          point: LatLng(lat - .00015, lng + longitudeOffset),
+          width: 100,
+          height: 120,
           alignment: Alignment.bottomCenter,
           child: AnimatedBuilder(
             animation: _pikuJump,
@@ -10986,6 +11788,7 @@ class _MarketMapScreenState extends State<MarketMapScreen>
               child: child,
             ),
             child: _MapPiku(
+              scale: .38,
               bob: _bob,
               blink: _blink,
               mouth: _mouth,
@@ -11073,182 +11876,306 @@ class _MarketMapScreenState extends State<MarketMapScreen>
           SafeArea(
             child: Column(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-                  child: Row(
-                    children: [
-                      _CircleIconButton(
-                        icon: Icons.arrow_back_rounded,
-                        onTap: () => Navigator.of(context).maybePop(),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          text('Nearby shops'),
-                          style: const TextStyle(
-                            color: PaytmColors.deepNavy,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ),
-                      const _PaytmLogo(size: 20),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 16, 8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          text(
-                            'Nearby map • sample sellers use demo locations',
-                          ),
-                          style: TextStyle(
-                            color: PaytmColors.deepNavy.withOpacity(.65),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () => launchUrl(
-                          Uri.parse('https://www.openstreetmap.org/copyright'),
-                          mode: LaunchMode.externalApplication,
-                        ),
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        child: const Text(
-                          '© OpenStreetMap contributors',
-                          style: TextStyle(fontSize: 9),
-                        ),
+                Container(
+                  margin: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(.96),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(.08),
+                        blurRadius: 20,
+                        offset: const Offset(0, 8),
                       ),
                     ],
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: TextField(
-                    controller: _search,
-                    onChanged: (_) => setState(() {}),
-                    decoration: InputDecoration(
-                      hintText: text('Search shops or items…'),
-                      prefixIcon: const Icon(Icons.search_rounded),
-                      filled: true,
-                      fillColor: Colors.white,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(18),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.94),
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: const [
-                        BoxShadow(color: Color(0x22002970), blurRadius: 12),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.auto_awesome_rounded,
-                          size: 16,
-                          color: PaytmColors.goldDeep,
-                        ),
-                        const SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            '${text('Your need:')} ${widget.intent.items.map((item) => item.displayName).join(', ')}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: PaytmColors.deepNavy,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Center on my location',
-                          visualDensity: VisualDensity.compact,
-                          onPressed: _centerMapOnUser,
-                          icon: const Icon(
-                            Icons.my_location_rounded,
-                            size: 18,
-                            color: PaytmColors.paytmBlue,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (_stores.any((shop) => !_hasMapLocation(shop)))
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.92),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
+                  child: Column(
+                    children: [
+                      Row(
                         children: [
-                          Text(
-                            text(
-                              'These saved shops need a GPS location to appear on the map. Tap one to view its details.',
-                            ),
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: PaytmColors.deepNavy,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
+                          _CircleIconButton(
+                            icon: Icons.arrow_back_rounded,
+                            onTap: () => Navigator.of(context).maybePop(),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              text('Nearby shops'),
+                              style: const TextStyle(
+                                color: PaytmColors.deepNavy,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                              ),
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            alignment: WrapAlignment.center,
-                            spacing: 6,
-                            children: _stores
-                                .where((shop) => !_hasMapLocation(shop))
-                                .map(
-                                  (shop) => ActionChip(
-                                    avatar: const Icon(
-                                      Icons.location_searching_rounded,
-                                      size: 15,
-                                    ),
-                                    label: Text(
-                                      (shop['business_name'] ?? 'Shop')
-                                          .toString(),
-                                    ),
-                                    visualDensity: VisualDensity.compact,
-                                    onPressed: () => _showShop(shop),
+                          const _PaytmLogo(size: 18),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _search,
+                        onChanged: (_) => setState(() {}),
+                        decoration: InputDecoration(
+                          hintText: text('Search shops or items…'),
+                          prefixIcon: const Icon(
+                            Icons.search_rounded,
+                            size: 20,
+                          ),
+                          filled: true,
+                          fillColor: PaytmColors.iceBlue,
+                          contentPadding: const EdgeInsets.symmetric(
+                            vertical: 10,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: PaytmColors.iceBlue,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.auto_awesome_rounded,
+                                    size: 14,
+                                    color: PaytmColors.goldDeep,
                                   ),
-                                )
-                                .toList(),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      '${text('Your need:')} ${widget.intent.items.map((item) => item.displayName).join(', ')}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: PaytmColors.deepNavy,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          GestureDetector(
+                            onTap: _centerMapOnUser,
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: PaytmColors.paytmBlue.withOpacity(.15),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.my_location_rounded,
+                                size: 16,
+                                color: PaytmColors.paytmBlue,
+                              ),
+                            ),
                           ),
                         ],
                       ),
+                      if (widget.intent.budgetInr != null ||
+                          widget.intent.priority != CustomerPriority.closest ||
+                          widget.intent.radiusKm != null ||
+                          widget.intent.openNowOnly) ...[
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              if (widget.intent.budgetInr != null)
+                                _miniBadge(
+                                  '💰',
+                                  'Under ₹${widget.intent.budgetInr!.toInt()}',
+                                ),
+                              if (widget.intent.radiusKm != null)
+                                _miniBadge(
+                                  '📍',
+                                  'Within ${_fmtKm(widget.intent.radiusKm)}',
+                                ),
+                              if (widget.intent.openNowOnly)
+                                _miniBadge('🕒', 'Open now'),
+                              if (widget.intent.priority !=
+                                  CustomerPriority.closest)
+                                _miniBadge(
+                                  '🎯',
+                                  switch (widget.intent.priority) {
+                                    CustomerPriority.cheapest => 'Cheapest',
+                                    CustomerPriority.bestRated => 'Best rated',
+                                    CustomerPriority.fairSmallShops =>
+                                      'Small shops',
+                                    CustomerPriority.closest => 'Closest',
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                      if (_stores.any((shop) => !_hasMapLocation(shop))) ...[
+                        const SizedBox(height: 6),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Wrap(
+                            spacing: 5,
+                            runSpacing: 2,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                text('Needs a saved GPS location:'),
+                                style: TextStyle(
+                                  color: PaytmColors.deepNavy.withOpacity(.65),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              ..._stores
+                                  .where((shop) => !_hasMapLocation(shop))
+                                  .map(
+                                    (shop) => ActionChip(
+                                      avatar: const Icon(
+                                        Icons.location_searching_rounded,
+                                        size: 13,
+                                      ),
+                                      label: Text(
+                                        (shop['business_name'] ?? 'Shop')
+                                            .toString(),
+                                      ),
+                                      visualDensity: VisualDensity.compact,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      onPressed: () => _showShop(shop),
+                                    ),
+                                  ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                if (stores.isNotEmpty)
+                  SizedBox(
+                    height: 108,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+                      itemCount: stores.length,
+                      itemBuilder: (context, index) {
+                        final shop = stores[index];
+                        final rating =
+                            (shop['rating'] as num?)?.toDouble() ?? 0;
+                        return GestureDetector(
+                          onTap: () => _showShop(shop),
+                          child: Container(
+                            width: 200,
+                            margin: const EdgeInsets.only(right: 9),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x18002970),
+                                  blurRadius: 9,
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 11,
+                                      backgroundColor: PaytmColors.iceBlue,
+                                      child: Text(
+                                        '${index + 1}',
+                                        style: const TextStyle(
+                                          color: PaytmColors.deepNavy,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 7),
+                                    Expanded(
+                                      child: Text(
+                                        (shop['business_name'] ?? 'Shop')
+                                            .toString(),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: PaytmColors.deepNavy,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Text(
+                                  (shop['business_type'] ?? '').toString(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: PaytmColors.deepNavy.withOpacity(
+                                      .62,
+                                    ),
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                Row(
+                                  children: [
+                                    Text(
+                                      '⭐ ${rating.toStringAsFixed(1)}',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 7),
+                                    Text(
+                                      _fmtKm(_distanceTo(shop)),
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    if (shop['isFairMatch'] == true) ...[
+                                      const Spacer(),
+                                      const Icon(
+                                        Icons.auto_awesome_rounded,
+                                        size: 14,
+                                        color: PaytmColors.goldDeep,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
-                const Spacer(),
                 if (_cart.isNotEmpty)
                   Container(
                     margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -11302,6 +12229,7 @@ class _MarketMapScreenState extends State<MarketMapScreen>
 }
 
 class _MapPiku extends StatelessWidget {
+  final double scale;
   final Animation<double> bob;
   final Animation<double> blink;
   final Animation<double> mouth;
@@ -11310,6 +12238,7 @@ class _MapPiku extends StatelessWidget {
   final _RobotExpression expression;
 
   const _MapPiku({
+    this.scale = .45,
     required this.bob,
     required this.blink,
     required this.mouth,
@@ -11331,7 +12260,7 @@ class _MapPiku extends StatelessWidget {
     builder: (context, _) => Transform.translate(
       offset: Offset(0, math.sin(bob.value * math.pi * 2) * 3),
       child: Transform.scale(
-        scale: .45,
+        scale: scale,
         alignment: Alignment.bottomCenter,
         child: _PremiumRobot(
           blink: blink.value,
@@ -11358,8 +12287,7 @@ class _AnimatedShopPin extends StatelessWidget {
   final bool isPriority;
   final bool isFairMatch;
   final String fairMatchLabel;
-  final String sampleDataLabel;
-  final String ordersTodayLabel;
+  final String topPickLabel;
   final bool highlighted;
   final VoidCallback onTap;
 
@@ -11370,8 +12298,7 @@ class _AnimatedShopPin extends StatelessWidget {
     required this.isPriority,
     required this.isFairMatch,
     required this.fairMatchLabel,
-    required this.sampleDataLabel,
-    required this.ordersTodayLabel,
+    required this.topPickLabel,
     required this.highlighted,
     required this.onTap,
   });
@@ -11380,8 +12307,6 @@ class _AnimatedShopPin extends StatelessWidget {
   Widget build(BuildContext context) {
     final rating = (shop['rating'] as num?)?.toDouble();
     final distance = (shop['distanceKm'] as num?)?.toDouble();
-    final fairScore = (shop['priorityScore'] as num?)?.toDouble() ?? 0;
-    final ordersToday = (shop['ordersToday'] ?? shop['orders_today']) as num?;
     final distanceLabel = distance == null || !distance.isFinite
         ? '—'
         : distance < 1
@@ -11403,96 +12328,50 @@ class _AnimatedShopPin extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (isFairMatch)
-              Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 7,
-                ),
-                decoration: BoxDecoration(
-                  color: PaytmColors.deepNavy,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: PaytmColors.deepNavy.withOpacity(.28),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      '🌟 $fairMatchLabel · ${(fairScore * 100).round()}',
-                      style: const TextStyle(
-                        color: PaytmColors.gold,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '⭐ ${rating?.toStringAsFixed(1) ?? '—'}  ·  $distanceLabel  ·  ${ordersToday?.toInt() ?? '—'} $ordersTodayLabel',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (shop['demoSampleMetrics'] == true ||
-                        shop['distanceIsDemo'] == true)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 3),
-                        child: Text(
-                          sampleDataLabel.toUpperCase(),
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(.72),
-                            fontSize: 8,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: .5,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
             if (isPriority)
               Container(
-                width: 84,
-                height: 35,
+                margin: const EdgeInsets.only(bottom: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [
-                      PaytmColors.gold.withOpacity(.55),
-                      PaytmColors.gold.withOpacity(0),
-                    ],
+                  color: PaytmColors.deepNavy,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: PaytmColors.deepNavy.withOpacity(.3),
+                      blurRadius: 6,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Text(
+                  isFairMatch ? '🌟 $fairMatchLabel' : '📍 $topPickLabel',
+                  style: const TextStyle(
+                    color: PaytmColors.gold,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
               ),
             Container(
-              constraints: const BoxConstraints(maxWidth: 150),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              constraints: const BoxConstraints(maxWidth: 140),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               decoration: BoxDecoration(
                 color: isPriority ? PaytmColors.gold : Colors.white,
-                borderRadius: BorderRadius.circular(15),
+                borderRadius: BorderRadius.circular(20),
                 border: Border.all(
                   color: isPriority
                       ? Colors.white
                       : highlighted
                       ? PaytmColors.goldDeep
-                      : PaytmColors.paytmBlue.withOpacity(.55),
-                  width: isPriority || highlighted ? 2 : 1,
+                      : PaytmColors.paytmBlue.withOpacity(.4),
+                  width: isPriority ? 2 : 1.5,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color:
-                        (isPriority
-                                ? PaytmColors.goldDeep
-                                : PaytmColors.deepNavy)
-                            .withOpacity(.25),
-                    blurRadius: isPriority ? 16 : 8,
+                    color: isPriority
+                        ? PaytmColors.goldDeep.withOpacity(.4)
+                        : Colors.black.withOpacity(.15),
+                    blurRadius: isPriority ? 12 : 6,
                     offset: const Offset(0, 4),
                   ),
                 ],
@@ -11500,21 +12379,15 @@ class _AnimatedShopPin extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (isPriority)
-                    const Icon(
-                      Icons.star_rounded,
-                      size: 14,
-                      color: PaytmColors.deepNavy,
-                    ),
                   Text(
                     (shop['emoji'] ?? '🏪').toString(),
-                    style: const TextStyle(fontSize: 19),
+                    style: const TextStyle(fontSize: 16),
                   ),
-                  const SizedBox(width: 5),
+                  const SizedBox(width: 4),
                   Flexible(
                     child: Text(
                       (shop['business_name'] ?? 'Shop').toString(),
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: PaytmColors.deepNavy,
@@ -11526,28 +12399,47 @@ class _AnimatedShopPin extends StatelessWidget {
                 ],
               ),
             ),
-            if (!isFairMatch && shop['demoSampleMetrics'] == true)
+            if (isPriority)
               Container(
-                margin: const EdgeInsets.only(bottom: 4),
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                margin: const EdgeInsets.only(top: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(.94),
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(
-                    color: PaytmColors.deepNavy.withOpacity(.12),
-                  ),
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.black12),
                 ),
-                child: Text(
-                  '⭐ ${rating?.toStringAsFixed(1) ?? '—'} · $distanceLabel · ${ordersToday?.toInt() ?? '—'} $ordersTodayLabel',
-                  style: const TextStyle(
-                    color: PaytmColors.deepNavy,
-                    fontSize: 8,
-                    fontWeight: FontWeight.w800,
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (rating != null) ...[
+                      const Icon(
+                        Icons.star_rounded,
+                        color: PaytmColors.goldDeep,
+                        size: 10,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        rating.toStringAsFixed(1),
+                        style: const TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    Text(
+                      distanceLabel,
+                      style: const TextStyle(
+                        color: PaytmColors.deepNavy,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             CustomPaint(
-              size: const Size(14, 9),
+              size: const Size(12, 8),
               painter: _MapPinTailPainter(isGold: isPriority),
             ),
           ],
