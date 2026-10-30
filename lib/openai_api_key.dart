@@ -1,0 +1,3 @@
+// Supply your key at run time with --dart-define=OPENAI_API_KEY=...
+// Do not commit API keys to source control.
+const String kOpenAiKey = String.fromEnvironment('OPENAI_API_KEY');
