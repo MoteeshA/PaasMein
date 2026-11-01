@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>Piku · Nearby Shops</title>
+<!-- Leaflet for the Map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --ink-top: #04152B;
+    --ink-bottom: #0A2A4D;
+    --paytm-blue: #00BAF2;
+    --paytm-blue-dark: #0288D1;
+    --deep-navy: #002970;
+    --gold: #FFC969;
+    --gold-deep: #F5A623;
+    --ice-blue: #E8F7FC;
+    --paper-blue: #F4FAFD;
+    --white: #ffffff;
+    --text-muted: rgba(255,255,255,0.7);
+    --navy-muted: rgba(0,41,112,0.7);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0; padding: 0; height: 100vh; width: 100vw;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+    background: var(--paper-blue);
+  }
+
+  /* --- STEP 1-4 WIZARD OVERLAY --- */
+  .wizard-overlay {
+    position: fixed; inset: 0; background: var(--ink-top); z-index: 2000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    transition: opacity 0.3s;
+  }
+  .wizard-overlay.hidden { opacity: 0; pointer-events: none; }
+
+  .wizard-robot {
+    width: 120px; height: 120px; background: url('https://api.dicebear.com/7.x/bottts/svg?seed=Piku&backgroundColor=00BAF2') no-repeat center/contain;
+    margin-bottom: 20px; animation: float 3s ease-in-out infinite;
+  }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+
+  .wizard-card {
+    background: var(--white); border-radius: 28px; padding: 24px;
+    width: 90%; max-width: 420px; box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  .wizard-header { text-align: center; margin-bottom: 10px; }
+  .wizard-title { font-size: 22px; font-weight: 900; color: var(--deep-navy); margin: 0 0 6px; }
+  .wizard-sub { font-size: 13px; color: var(--navy-muted); margin: 0; line-height: 1.4; }
+  .wizard-step { font-size: 12px; font-weight: 800; color: var(--paytm-blue); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+
+  .wizard-input {
+    width: 100%; height: 54px; border-radius: 16px; border: 1.5px solid var(--ice-blue);
+    background: var(--ice-blue); padding: 0 16px; font-size: 15px; font-weight: 600; color: var(--deep-navy);
+    outline: none; transition: border-color 0.2s;
+  }
+  .wizard-input:focus { border-color: var(--paytm-blue); }
+
+  .wizard-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .wizard-chip {
+    padding: 8px 14px; border-radius: 20px; background: var(--ice-blue);
+    color: var(--deep-navy); font-size: 13px; font-weight: 700; cursor: pointer;
+    border: 1px solid rgba(0,186,242,0.2); transition: all 0.2s;
+  }
+  .wizard-chip.active { background: var(--gold); border-color: var(--gold-deep); }
+  .wizard-chip:hover { background: rgba(0,186,242,0.1); }
+
+  .wizard-btn {
+    width: 100%; height: 54px; border-radius: 16px; border: none; background: var(--paytm-blue);
+    color: var(--white); font-size: 16px; font-weight: 900; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px;
+  }
+  .wizard-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Map overlay */
+  #map { width: 100%; height: 100%; z-index: 1; }
+
+  /* Top floating bar */
+  .top-bar-wrap {
+    position: absolute; top: env(safe-area-inset-top, 16px); left: 0; right: 0;
+    padding: 12px 16px; z-index: 1000; pointer-events: none;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+
+  .search-card {
+    background: rgba(255, 255, 255, 0.96);
+    border-radius: 24px;
+    padding: 14px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    pointer-events: auto;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+
+  .header-row { display: flex; align-items: center; gap: 10px; }
+
+  .circle-btn {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: none; background: var(--ice-blue);
+    color: var(--deep-navy); display: grid; place-items: center;
+    cursor: pointer;
+  }
+
+  .title { font-size: 16px; font-weight: 900; color: var(--deep-navy); flex: 1; }
+
+  .input-row {
+    display: flex; align-items: center; background: var(--ice-blue);
+    border-radius: 14px; padding: 0 12px; height: 44px;
+  }
+  .input-row svg { color: var(--paytm-blue); width: 18px; height: 18px; margin-right: 8px; }
+  .input-row input {
+    border: none; background: transparent; outline: none; width: 100%;
+    font-size: 14px; font-weight: 600; color: var(--deep-navy);
+  }
+
+  .badge-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .need-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--ice-blue); padding: 6px 10px; border-radius: 12px;
+    font-size: 11px; font-weight: 800; color: var(--deep-navy);
+  }
+
+  /* Custom Map Markers */
+  .custom-pin {
+    background: var(--white); border-radius: 20px; padding: 6px 10px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15); border: 1.5px solid rgba(0,186,242,0.4);
+    display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 900; color: var(--deep-navy);
+    white-space: nowrap; position: absolute; left: 50%; bottom: 6px;
+    transform: translateX(-50%); margin: 0; cursor: pointer;
+  }
+  .custom-pin.priority {
+    background: var(--gold); border-color: var(--white); border-width: 2px;
+    box-shadow: 0 8px 20px rgba(245,166,35,0.4);
+    transform: translateX(-50%) scale(1.1); transform-origin: center bottom;
+  }
+  .custom-pin::after {
+    content: ''; position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
+    border-width: 6px 6px 0; border-style: solid; border-color: var(--white) transparent transparent transparent;
+  }
+  .custom-pin.priority::after { border-color: var(--gold) transparent transparent transparent; }
+  .piku-pick {
+    position: absolute; left: 50%; top: -42px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 5px; padding: 4px 8px 4px 4px;
+    border: 1px solid rgba(0,41,112,0.12); border-radius: 18px;
+    background: var(--white); color: var(--deep-navy); font-size: 10px;
+    font-weight: 900; box-shadow: 0 4px 14px rgba(0,41,112,0.24);
+    pointer-events: none; z-index: 2;
+  }
+  .piku-avatar {
+    width: 24px; height: 24px; display: grid; place-items: center;
+    border-radius: 50%; background: var(--paytm-blue); font-size: 15px;
+    animation: pikuGlow 1.8s ease-in-out infinite alternate;
+  }
+  @keyframes pikuGlow {
+    from { box-shadow: 0 0 0 0 rgba(0,186,242,0.2); }
+    to { box-shadow: 0 0 0 5px rgba(0,186,242,0.28); }
+  }
+
+  .user-pin {
+    width: 18px; height: 18px; background: #2878F0; border: 3px solid #fff;
+    border-radius: 50%; box-shadow: 0 0 10px rgba(40,120,240,0.5);
+    transform: translate(-50%, -50%);
+  }
+
+  /* Bottom Sheet */
+  .sheet-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1005;
+    opacity: 0; pointer-events: none; transition: opacity 0.3s;
+  }
+  .sheet-backdrop.open { opacity: 1; pointer-events: auto; }
+
+  .sheet {
+    position: fixed; bottom: 0; left: 0; right: 0; background: var(--white);
+    border-radius: 28px 28px 0 0; z-index: 1010;
+    transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
+    max-height: 85vh; display: flex; flex-direction: column;
+    box-shadow: 0 -10px 40px rgba(0,0,0,0.2);
+  }
+  .sheet.open { transform: translateY(0); }
+  .sheet-drag { width: 40px; height: 5px; background: rgba(0,0,0,0.1); border-radius: 3px; margin: 12px auto; }
+
+  .sheet-content { padding: 0 24px 30px; overflow-y: auto; }
+
+  .shop-header { display: flex; gap: 12px; margin-bottom: 16px; }
+  .shop-emoji { font-size: 34px; }
+  .shop-title { font-size: 20px; font-weight: 900; color: var(--deep-navy); margin: 0 0 4px; }
+  .shop-sub { font-size: 12px; color: var(--navy-muted); font-weight: 600; }
+  .shop-photo-container { display: none; margin: 0 0 16px; }
+  .shop-photo-container img { display: block; width: 100%; max-height: 220px; object-fit: cover; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,.1); }
+
+  /* Menu Card */
+  .menu-card {
+    background: var(--white); border-radius: 20px; overflow: hidden;
+    border: 1px solid rgba(0,41,112,0.08); margin-bottom: 20px;
+    box-shadow: 0 4px 15px rgba(0,41,112,0.04);
+  }
+  .menu-header { background: var(--deep-navy); padding: 16px; display: flex; align-items: center; justify-content: space-between; }
+  .menu-title { color: var(--white); font-size: 18px; font-weight: 900; margin: 0; }
+  .qr-box { background: var(--white); padding: 4px; border-radius: 8px; }
+  .qr-box img { width: 44px; height: 44px; display: block; }
+
+  .menu-items { padding: 16px; }
+  .menu-item { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .menu-item:last-child { margin-bottom: 0; }
+  .item-name { font-size: 14px; font-weight: 700; color: var(--deep-navy); }
+  .item-price { font-size: 14px; font-weight: 900; color: var(--gold-deep); }
+
+  .menu-footer { background: var(--ice-blue); padding: 10px; text-align: center; font-size: 10px; font-weight: 800; color: var(--deep-navy); }
+
+  /* Action Buttons */
+  .btn-onit {
+    width: 100%; height: 54px; border-radius: 16px; border: none;
+    background: linear-gradient(90deg, var(--paytm-blue), var(--paytm-blue-dark));
+    color: var(--white); font-weight: 900; font-size: 16px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    cursor: pointer; box-shadow: 0 8px 24px rgba(0,186,242,0.4); margin-bottom: 12px;
+  }
+
+  /* Negotiation Overlay (Sage) */
+  .sage-overlay {
+    position: fixed; inset: 0; background: var(--ink-top); z-index: 2000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transition: opacity 0.3s;
+  }
+  .sage-overlay.open { opacity: 1; pointer-events: auto; }
+  .sage-ring {
+    width: 100px; height: 100px; border-radius: 50%; background: rgba(0,186,242,0.15);
+    border: 2px solid var(--paytm-blue); display: grid; place-items: center; margin-bottom: 24px;
+    animation: pulse 1.5s infinite;
+  }
+  .sage-ring.busy { animation: eq 0.8s infinite alternate; border-color: var(--gold); background: rgba(245,166,35,0.15); }
+  @keyframes pulse { 0%,100% { transform: scale(0.95); } 50% { transform: scale(1.05); } }
+  @keyframes eq { 0% { transform: scaleY(1); } 100% { transform: scaleY(0.8); } }
+  .sage-icon { width: 44px; height: 44px; color: var(--paytm-blue); }
+  .sage-status { color: var(--white); font-size: 18px; font-weight: 700; text-align: center; padding: 0 20px; margin-bottom: 10px; }
+  .sage-quote { color: rgba(255,255,255,0.8); font-size: 15px; font-style: italic; text-align: center; padding: 0 30px; margin-bottom: 40px; }
+
+  .sage-inputs { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .sage-chat-container { width: 100%; max-width: 420px; padding: 0 20px; display: flex; flex-direction: column; gap: 10px; }
+  .sage-prompt { color: var(--text-muted); font-size: 14px; font-weight: 600; line-height: 1.4; margin-bottom: 4px; }
+  .sage-chat-input-wrapper { display: flex; align-items: center; background: var(--white); border-radius: 24px; padding: 6px 6px 6px 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+  .sage-chat-input { flex: 1; min-width: 0; border: none; outline: none; font-size: 15px; font-weight: 600; color: var(--deep-navy); background: transparent; padding: 8px 0; }
+  .sage-chat-input::placeholder { color: rgba(0,41,112,0.4); font-weight: 500; }
+  .sage-send-btn { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--paytm-blue); color: var(--white); display: grid; place-items: center; cursor: pointer; transition: transform 0.1s; }
+  .sage-send-btn:active { transform: scale(0.95); }
+  .sage-send-btn svg { width: 18px; height: 18px; }
+  .sage-quick-offer { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .sage-quick-offer label { color: var(--text-muted); font-size: 13px; font-weight: 600; }
+  .sage-offer-input { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 8px 12px; color: var(--white); font-size: 14px; font-weight: 600; outline: none; width: 100px; }
+  .sage-offer-input::placeholder { color: rgba(255,255,255,0.4); }
+  .sage-mode-toggle { display: flex; gap: 8px; margin-bottom: 12px; width: 100%; max-width: 420px; padding: 0 20px; }
+  .sage-mode-btn { flex: 1; padding: 10px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2); background: transparent; color: rgba(255,255,255,0.6); font-weight: 700; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+  .sage-mode-btn.active { background: var(--white); color: var(--deep-navy); border-color: var(--white); }
+  .sage-actions { display: flex; gap: 12px; margin-top: 10px; width: 100%; max-width: 420px; padding: 0 20px; }
+  .sage-btn-outline { flex: 1; height: 48px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.3); background: transparent; color: var(--white); font-weight: 700; cursor: pointer; }
+  .sage-btn-filled { flex: 2; height: 48px; border-radius: 14px; border: none; background: var(--paytm-blue); color: var(--white); font-weight: 900; cursor: pointer; }
+  .close-sage { position: absolute; top: env(safe-area-inset-top, 20px); left: 20px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); width: 40px; height: 40px; border-radius: 50%; color: white; display: grid; place-items: center; cursor: pointer; z-index: 2100; }
+
+  /* Snackbar */
+  .snackbar {
+    position: fixed; bottom: 30px; left: 50%; transform: translate(-50%, 20px);
+    background: #111; color: #fff; padding: 12px 20px; border-radius: 12px;
+    font-size: 14px; font-weight: 600; opacity: 0; transition: all 0.3s ease; pointer-events: none; z-index: 3000;
+  }
+  .snackbar.show { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+
+<!-- Step Wizard Overlay -->
+<div class="wizard-overlay" id="wizardOverlay">
+  <div class="wizard-robot"></div>
+  <div class="wizard-card" id="wizardCard">
+    <!-- Injected via JS -->
+  </div>
+</div>
+
+<div id="map"></div>
+
+<!-- Top Search Bar -->
+<div class="top-bar-wrap">
+  <div class="search-card">
+    <div class="header-row">
+      <button class="circle-btn" onclick="location.reload()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="title">Nearby shops</div>
+      <button class="circle-btn" aria-label="Server settings" title="Server settings" onclick="editBackend()">⚙</button>
+    </div>
+
+    <div class="input-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input type="text" id="searchInput" placeholder="Search shops or items..." />
+    </div>
+
+    <div class="badge-row" id="badgeRow">
+      <!-- Injected via JS -->
+    </div>
+  </div>
+</div>
+
+<!-- Shop Detail Bottom Sheet -->
+<div class="sheet-backdrop" id="sheetBackdrop" onclick="closeShopSheet()"></div>
+<div class="sheet" id="shopSheet">
+  <div class="sheet-drag"></div>
+  <div class="sheet-content">
+    <div class="shop-header">
+      <div class="shop-emoji" id="shEmoji">🥦</div>
+      <div>
+        <h2 class="shop-title" id="shName">Sunita Vegetables</h2>
+        <div class="shop-sub" id="shSub">Fresh produce · 1.2 km away</div>
+      </div>
+    </div>
+
+    <div id="shopPhotoContainer" class="shop-photo-container">
+      <img id="shopPhoto" alt="Photo of this shop" />
+    </div>
+
+    <!-- QR Menu Card Preview -->
+    <div class="menu-card">
+      <div class="menu-header">
+        <h3 class="menu-title" id="menuName">Sunita Vegetables</h3>
+        <div class="qr-box">
+          <img id="menuQr" src="" alt="QR" />
+        </div>
+      </div>
+      <div class="menu-items" id="menuItems">
+        <!-- Items injected here -->
+      </div>
+      <div class="menu-footer">Powered by Paytm Buddy</div>
+    </div>
+
+    <!-- ONIT Trigger -->
+    <button class="btn-onit" id="onitBtn" onclick="openSage()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+      Ask ONIT AI to negotiate
+    </button>
+  </div>
+</div>
+
+<!-- Sage Negotiation Overlay -->
+<div class="sage-overlay" id="sageOverlay">
+  <button class="close-sage" onclick="closeSage()">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+  </button>
+
+  <div class="sage-ring" id="sageRing">
+    <svg class="sage-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+  </div>
+  <div class="sage-status" id="sageStatus">Negotiate with this seller</div>
+  <div class="sage-quote" id="sageQuote"></div>
+
+  <div class="sage-mode-toggle" id="sageModeToggle">
+    <button class="sage-mode-btn active" id="btnAsk" onclick="setSageMode('ask')">Ask a Question</button>
+    <button class="sage-mode-btn" id="btnNegotiate" onclick="setSageMode('negotiate')">Negotiate Price</button>
+  </div>
+
+  <div class="sage-inputs" id="sageInputs">
+    <div class="sage-chat-container">
+      <div class="sage-prompt" id="sagePrompt">Hi! I'm Sage, your AI shopping assistant. What can I get for you today?</div>
+      <div class="sage-chat-input-wrapper">
+        <input type="text" id="sageQuestion" class="sage-chat-input" placeholder="e.g. Can I get chai with bun?" autocomplete="off" />
+        <button class="sage-send-btn" id="sageSendBtn" aria-label="Ask Sage to negotiate" onclick="startNegotiation()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4L22 2z"/></svg>
+        </button>
+      </div>
+      <div class="sage-quick-offer" id="sageOfferWrapper" style="display:none">
+        <label for="sageOffer">Offer:</label>
+        <input type="text" id="sageOffer" class="sage-offer-input" placeholder="e.g. ₹30" value="₹30" />
+      </div>
+    </div>
+  </div>
+  <div class="sage-actions" id="sageDecisionActions" style="display:none"></div>
+</div>
+
+<div class="snackbar" id="snackbar"></div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* =========================================================
+   CONFIGURATION
+   ========================================================= */
+const params = new URLSearchParams(location.search);
+let query = params.get('q') || '';
+let budgetInr = params.has('budget') ? Number(params.get('budget')) : null;
+let radiusKm = params.has('radius') ? Number(params.get('radius')) : 2;
+let priority = 'closest';
+let openNowOnly = false;
+let currentStep = 0;
+const showMapPreview = params.get('map') === '1';
+
+const defaultBackendUrl = 'http://10.150.28.14:5001';
+function normalizeBackendUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    const loopback = host === 'localhost' || host.endsWith('.localhost') ||
+      host === '::1' || host.startsWith('127.');
+    if (['http:', 'https:'].includes(parsed.protocol) && !loopback) {
+      return value.trim().replace(/\/+$/, '');
+    }
+  } catch (_) {}
+  return defaultBackendUrl;
+}
+let backendUrl = normalizeBackendUrl(
+  params.get('backend') || localStorage.getItem('onit_backend_url') || defaultBackendUrl
+);
+localStorage.setItem('onit_backend_url', backendUrl);
+
+const $ = (id) => document.getElementById(id);
+const showSnack = (msg) => {
+  const el = $('snackbar'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(showSnack.t); showSnack.t = setTimeout(() => el.classList.remove('show'), 3000);
+};
+
+window.editBackend = () => {
+  const value = window.prompt('ONIT server URL', backendUrl);
+  if (value === null) return;
+  try {
+    const parsed = new URL(value.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error();
+    backendUrl = normalizeBackendUrl(value.trim());
+    localStorage.setItem('onit_backend_url', backendUrl);
+    showSnack('ONIT server updated');
+  } catch (_) {
+    showSnack('Enter a valid http(s) server URL');
+  }
+};
+
+/* =========================================================
+   WIZARD FLOW
+   ========================================================= */
+function renderWizard() {
+  const card = $('wizardCard');
+  card.innerHTML = '';
+
+  if (currentStep === 0) {
+    card.innerHTML = `
+      <div class="wizard-header">
+        <div class="wizard-step">Step 1 of 4</div>
+        <h2 class="wizard-title">What do you need?</h2>
+        <p class="wizard-sub">Tell Piku what you are shopping for.</p>
+      </div>
+      <input type="text" class="wizard-input" id="wizInput" placeholder="e.g. rice and cooking oil" value="${query}">
+      <div class="wizard-chips">
+        <div class="wizard-chip" onclick="setWizardInput('rice')">Rice</div>
+        <div class="wizard-chip" onclick="setWizardInput('vegetables')">Vegetables</div>
+        <div class="wizard-chip" onclick="setWizardInput('tea and snacks')">Tea & Snacks</div>
+      </div>
+      <button class="wizard-btn" onclick="nextStep()">Continue</button>
+    `;
+  } else if (currentStep === 1) {
+    card.innerHTML = `
+      <div class="wizard-header">
+        <div class="wizard-step">Step 2 of 4</div>
+        <h2 class="wizard-title">Any budget in mind?</h2>
+        <p class="wizard-sub">A quick preference helps Piku find a better match.</p>
+      </div>
+      <input type="number" class="wizard-input" id="wizInput" placeholder="Maximum budget (₹)" value="${budgetInr || ''}">
+      <div class="wizard-chips">
+        <div class="wizard-chip" onclick="setBudget(100)">₹100</div>
+        <div class="wizard-chip" onclick="setBudget(300)">₹300</div>
+        <div class="wizard-chip" onclick="setBudget(500)">₹500</div>
+        <div class="wizard-chip" onclick="setBudget(0)">No budget</div>
+      </div>
+      <button class="wizard-btn" onclick="nextStep()">Continue</button>
+    `;
+  } else if (currentStep === 2) {
+    card.innerHTML = `
+      <div class="wizard-header">
+        <div class="wizard-step">Step 3 of 4</div>
+        <h2 class="wizard-title">How far will you travel?</h2>
+        <p class="wizard-sub">Choose a radius or enter one.</p>
+      </div>
+      <input type="number" class="wizard-input" id="wizInput" placeholder="Maximum distance (km)" value="${radiusKm || ''}">
+      <div class="wizard-chips">
+        <div class="wizard-chip" onclick="setRadius(0.5)">0.5 km</div>
+        <div class="wizard-chip" onclick="setRadius(1.0)">1 km</div>
+        <div class="wizard-chip" onclick="setRadius(2.0)">2 km</div>
+        <div class="wizard-chip" onclick="setRadius(5.0)">5 km</div>
+      </div>
+      <button class="wizard-btn" onclick="nextStep()">Continue</button>
+    `;
+  } else if (currentStep === 3) {
+    card.innerHTML = `
+      <div class="wizard-header">
+        <div class="wizard-step">Step 4 of 4</div>
+        <h2 class="wizard-title">How should I rank shops?</h2>
+        <p class="wizard-sub">A quick preference helps Piku find a better match.</p>
+      </div>
+      <div class="wizard-chips" style="flex-direction:column; gap:8px">
+        <div class="wizard-chip" style="width:100%;text-align:center" onclick="setPriority('closest')">Closest</div>
+        <div class="wizard-chip" style="width:100%;text-align:center" onclick="setPriority('cheapest')">Cheapest</div>
+        <div class="wizard-chip" style="width:100%;text-align:center" onclick="setPriority('bestRated')">Best rated</div>
+        <div class="wizard-chip" style="width:100%;text-align:center" onclick="setPriority('fairSmallShops')">Support small shops</div>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600;color:var(--deep-navy);margin-top:10px">
+        <input type="checkbox" ${openNowOnly ? 'checked' : ''} onchange="openNowOnly = this.checked" style="width:18px;height:18px">
+        Only show shops open now
+      </label>
+      <button class="wizard-btn" onclick="finishWizard()">Show nearby shops</button>
+    `;
+  }
+
+  // Highlight active chips
+  if (currentStep === 1 && budgetInr !== null) {
+    document.querySelectorAll('.wizard-chip').forEach(el => {
+      if (el.textContent.includes(budgetInr) || (budgetInr === 0 && el.textContent === 'No budget')) el.classList.add('active');
+    });
+  }
+  if (currentStep === 2 && radiusKm) {
+    document.querySelectorAll('.wizard-chip').forEach(el => {
+      if (el.textContent.includes(radiusKm)) el.classList.add('active');
+    });
+  }
+  if (currentStep === 3) {
+    const label = { closest: 'Closest', cheapest: 'Cheapest', bestRated: 'Best rated', fairSmallShops: 'Support small shops' }[priority];
+    document.querySelectorAll('.wizard-chip').forEach(el => {
+      if (el.textContent === label) el.classList.add('active');
+    });
+  }
+}
+
+window.setWizardInput = (val) => $('wizInput').value = val;
+window.setBudget = (val) => { budgetInr = val; renderWizard(); };
+window.setRadius = (val) => { radiusKm = val; renderWizard(); };
+window.setPriority = (val) => { priority = val; renderWizard(); };
+
+window.nextStep = () => {
+  if (currentStep === 0) {
+    query = $('wizInput').value.trim();
+    if (!query) return showSnack('Tell Piku what you need first.');
+  } else if (currentStep === 1) {
+    const val = parseFloat($('wizInput').value);
+    budgetInr = isNaN(val) ? null : val;
+  } else if (currentStep === 2) {
+    const val = parseFloat($('wizInput').value);
+    if (isNaN(val) || val <= 0) return showSnack('Enter a valid distance.');
+    radiusKm = val;
+  }
+  currentStep++;
+  renderWizard();
+};
+
+window.finishWizard = () => {
+  $('wizardOverlay').classList.add('hidden');
+  initMap();
+};
+
+/* =========================================================
+   MAP + DEMO DATA
+   ========================================================= */
+const demoUserLoc = [28.6139, 77.2090]; // New Delhi (Demo)
+let userLoc = [...demoUserLoc];
+let hasBuyerLocation = false;
+let map;
+let userMarker = null;
+
+function initMap() {
+  map = L.map('map', { zoomControl: false }).setView(userLoc, 15);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const userIcon = L.divIcon({ className: 'custom-div-icon', html: '<div class="user-pin"></div>', iconSize: [20, 20] });
+  userMarker = L.marker(userLoc, { icon: userIcon }).addTo(map);
+
+  // Use the buyer's real location when available. If location is denied, the
+  // map will center on a published shop so onboarded merchants remain visible.
+  if (navigator.geolocation && !showMapPreview) {
+    navigator.geolocation.getCurrentPosition(position => {
+      hasBuyerLocation = true;
+      userLoc = [position.coords.latitude, position.coords.longitude];
+      userMarker.setLatLng(userLoc).addTo(map);
+      updateSearch(query);
+    }, () => {}, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
+  }
+
+  // Update top bar badges
+  const badgeRow = $('badgeRow');
+  badgeRow.innerHTML = `<div class="need-badge">⭐ Your need: <span id="needBadgeText" style="color:var(--paytm-blue-dark)"></span></div>`;
+  $('needBadgeText').textContent = query || 'all items';
+  if (budgetInr) badgeRow.innerHTML += `<div class="need-badge">💰 Under ₹${budgetInr}</div>`;
+  if (radiusKm) badgeRow.innerHTML += `<div class="need-badge">📍 Within ${radiusKm} km</div>`;
+  if (openNowOnly) badgeRow.innerHTML += `<div class="need-badge">🕒 Open now</div>`;
+  if (priority !== 'closest') badgeRow.innerHTML += `<div class="need-badge">🎯 ${priority}</div>`;
+
+  // Initial render
+  $('searchInput').value = query;
+  updateSearch(query);
+  loadPublishedShops();
+  setInterval(loadPublishedShops, 5000);
+}
+
+const demoShops = [
+  { id: 'demo_vegetables', name: 'Sunita Vegetables', type: 'Fresh produce', emoji: '🥦', dist: '400m', lat: 28.6160, lng: 77.2110, items: [{name:'Gobi (Cauliflower)', price:'₹40'}, {name:'Onion', price:'₹35'}, {name:'Tomato', price:'₹30'}] },
+  { id: 'demo_kirana', name: 'Ramesh Kirana', type: 'Grocery', emoji: '🛒', dist: '800m', lat: 28.6100, lng: 77.2050, items: [{name:'Rice 1kg', price:'₹60'}, {name:'Gobi', price:'₹45'}, {name:'Oil 1L', price:'₹140'}] },
+  { id: 'demo_chai', name: 'Chai Corner', type: 'Tea & snacks', emoji: '☕', dist: '1.2km', lat: 28.6180, lng: 77.2010, items: [{name:'Masala Chai', price:'₹15'}, {name:'Samosa', price:'₹20'}] }
+];
+let shops = [...demoShops];
+let publishedShopSignature = '';
+
+let activeShop = null;
+let selectedShopId = null;
+let priorityCircle = null;
+const shopMarkers = new Map();
+
+function makeShopIcon(shop, priority) {
+  return L.divIcon({
+    className: 'custom-div-icon',
+    html: `<div class="custom-pin ${priority ? 'priority' : ''}">${priority ? '<span class="piku-pick"><span class="piku-avatar">🤖</span><span>Piku pick</span></span>' : ''}${shop.emoji} ${shop.name}</div>`,
+    // Match Leaflet's hitbox to the visible marker so taps open its shop card.
+    iconSize: [220, 100], iconAnchor: [110, 100]
+  });
+}
+
+shops.forEach((shop) => {
+  const marker = L.marker([shop.lat, shop.lng], { icon: makeShopIcon(shop, false) });
+  marker.on('click', () => openShopSheet(shop.id));
+  shopMarkers.set(shop.id, marker);
+});
+
+function updateSearch(rawQuery) {
+  query = rawQuery.trim() || '';
+  const normalized = rawQuery.trim().toLocaleLowerCase();
+
+  // Filter based on query
+  const matched = shops.filter(shop => {
+    if (!normalized) return true;
+    return shop.name.toLocaleLowerCase().includes(normalized) ||
+           shop.type.toLocaleLowerCase().includes(normalized) ||
+           shop.items.some(item => item.name.toLocaleLowerCase().includes(normalized));
+  });
+
+  const withinBudget = matched.filter(shop => {
+    if (budgetInr === null || budgetInr <= 0) return true;
+    const productMatches = normalized
+      ? shop.items.filter(item => item.name.toLocaleLowerCase().includes(normalized))
+      : shop.items;
+    const relevantItems = productMatches.length ? productMatches : shop.items;
+    return relevantItems.some(item => {
+      const price = Number(String(item.price || '').replace(/[^0-9.]/g, ''));
+      return !Number.isFinite(price) || price <= budgetInr;
+    });
+  }).filter(shop => !openNowOnly || shop.openNow !== false);
+
+  // Filter based on radius
+  const inRadius = withinBudget.filter(shop => {
+    const dist = L.latLng(shop.lat, shop.lng).distanceTo(L.latLng(userLoc[0], userLoc[1])) / 1000;
+    return dist <= (radiusKm || 2);
+  });
+
+  if (selectedShopId && !inRadius.some(shop => shop.id === selectedShopId)) {
+    selectedShopId = null;
+  }
+
+  // Sort based on priority
+  if (priority === 'cheapest') {
+    // Very rough mock logic
+    inRadius.sort((a, b) => {
+      const aPrice = parseInt(a.items[0]?.price?.replace(/[^0-9]/g, '') || '0');
+      const bPrice = parseInt(b.items[0]?.price?.replace(/[^0-9]/g, '') || '0');
+      return aPrice - bPrice;
+    });
+  } else if (priority === 'bestRated') {
+    // Random mock sorting for best rated
+    inRadius.sort(() => Math.random() - 0.5);
+  }
+  const pikuShop = inRadius.find(shop => shop.id === selectedShopId) || inRadius[0];
+
+  const needBadgeText = $('needBadgeText');
+  if (needBadgeText) needBadgeText.textContent = rawQuery.trim() || 'all items';
+
+  shops.forEach(shop => {
+    const marker = shopMarkers.get(shop.id);
+    if (inRadius.includes(shop)) {
+      marker.setIcon(makeShopIcon(shop, shop === pikuShop));
+      marker.addTo(map);
+    } else {
+      map.removeLayer(marker);
+    }
+  });
+
+  if (priorityCircle) map.removeLayer(priorityCircle);
+  priorityCircle = pikuShop
+    ? L.circle([pikuShop.lat, pikuShop.lng], { radius: 80, color: '#FFC969', fillOpacity: 0.22, weight: 2 }).addTo(map)
+    : null;
+
+  if (inRadius.length) {
+    map.fitBounds(L.latLngBounds(inRadius.map(shop => [shop.lat, shop.lng])).pad(0.45), { maxZoom: 15 });
+  } else {
+    showSnack(`No shops found for “${rawQuery}”`);
+  }
+  return inRadius;
+}
+
+function normalizeShop(raw, index) {
+  const fallback = demoShops.find(shop => shop.id === String(raw.id)) || demoShops[index % demoShops.length];
+  const rawItems = raw.items;
+  const items = Array.isArray(rawItems)
+    ? rawItems.map(item => typeof item === 'string'
+        ? { name: item.trim(), price: raw.price_band || 'Ask seller' }
+        : { name: String(item.name || item.title || item.product || ''), price: String(item.price || 'Ask seller') })
+      .filter(item => item.name)
+    : String(rawItems || '').split(/[,;\n]/).map(name => name.trim()).filter(Boolean)
+      .map(name => ({ name, price: raw.price_band || 'Ask seller' }));
+  const latitude = Number(raw.latitude ?? raw.lat ?? fallback.lat);
+  const longitude = Number(raw.longitude ?? raw.lng ?? fallback.lng);
+  return {
+    id: String(raw.id),
+    name: String(raw.name || raw.business_name || 'Local shop'),
+    type: String(raw.type || raw.business_type || 'Shop'),
+    emoji: String(raw.emoji || fallback.emoji),
+    dist: raw.distance_km != null ? `${Number(raw.distance_km).toFixed(1)}km` : (raw.location || fallback.dist),
+    lat: Number.isFinite(latitude) ? latitude : fallback.lat,
+    lng: Number.isFinite(longitude) ? longitude : fallback.lng,
+    items,
+    openNow: raw.open_now === undefined ? null : raw.open_now === true || String(raw.open_now).toLowerCase() === 'true',
+    onitEnabled: raw.onit_enabled !== false && String(raw.onit_enabled).toLowerCase() !== 'false',
+    phone: String(raw.phone || ''),
+    photo: raw.photo || raw.shop_photo || null
+  };
+}
+
+function renderShopMarkers() {
+  shopMarkers.forEach(marker => map.removeLayer(marker));
+  shopMarkers.clear();
+  shops.forEach(shop => {
+    const marker = L.marker([shop.lat, shop.lng], { icon: makeShopIcon(shop, false) });
+    marker.on('click', () => openShopSheet(shop.id));
+    shopMarkers.set(shop.id, marker);
+  });
+  updateSearch($('searchInput').value);
+}
+
+async function loadPublishedShops() {
+  try {
+    const response = await fetch(`${backendUrl}/api/shops`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`shop list request failed (${response.status})`);
+    const data = await response.json();
+    const published = (Array.isArray(data.shops) ? data.shops : [])
+      .filter(shop => shop && shop.id)
+      .map(normalizeShop);
+    if (!published.length) return;
+    const signature = JSON.stringify(published);
+    if (signature === publishedShopSignature) return;
+    publishedShopSignature = signature;
+
+    const publishedIds = new Set(published.map(shop => shop.id));
+    const anchor = published.find(shop => Number.isFinite(shop.lat) && Number.isFinite(shop.lng));
+    if (anchor && (!hasBuyerLocation || showMapPreview)) {
+      userLoc = [anchor.lat, anchor.lng];
+      if (userMarker && map.hasLayer(userMarker)) map.removeLayer(userMarker);
+    }
+
+    // Mix in demo shops
+    const relatedDemos = demoShops
+      .filter(shop => !publishedIds.has(shop.id))
+      .map((shop, index) => anchor ? {
+        ...shop,
+        lat: anchor.lat + 0.002 * (index + 1),
+        lng: anchor.lng + 0.0015 * (index + 1),
+      } : shop);
+
+    shops = [...published, ...relatedDemos];
+    renderShopMarkers();
+  } catch (error) {
+    console.info('Using bundled demo shops; app shop sync is not available yet.', error);
+  }
+}
+
+$('searchInput').addEventListener('input', e => updateSearch(e.target.value));
+$('searchInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const first = updateSearch(e.target.value)[0];
+    if (first) openShopSheet(first.id);
+  }
+});
+
+/* =========================================================
+   SHOP DETAILS SHEET
+   ========================================================= */
+window.openShopSheet = (id) => {
+  activeShop = shops.find(s => s.id === id);
+  if (!activeShop) return;
+  selectedShopId = id;
+  updateSearch($('searchInput').value);
+
+  $('shName').textContent = activeShop.name;
+  $('shSub').textContent = `${activeShop.type} · ${activeShop.dist} away`;
+  $('shEmoji').textContent = activeShop.emoji;
+  $('menuName').textContent = activeShop.name;
+
+  const photoContainer = $('shopPhotoContainer');
+  const photoImg = $('shopPhoto');
+  photoContainer.style.display = 'none';
+  photoImg.onload = () => { photoContainer.style.display = 'block'; };
+  photoImg.onerror = () => { photoContainer.style.display = 'none'; };
+  if (activeShop.photo) {
+    const photo = String(activeShop.photo);
+    photoImg.src = photo.startsWith('data:') || /^https?:\/\//i.test(photo)
+      ? photo
+      : `data:image/jpeg;base64,${photo}`;
+  } else {
+    photoImg.removeAttribute('src');
+  }
+
+  // Set QR Image
+  $('menuQr').src = `https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=piku_store://${activeShop.id}`;
+
+  // Render Items
+  const itemsHtml = activeShop.items.map(item => `
+    <div class="menu-item">
+      <div class="item-name">${item.name}</div>
+      <div class="item-price">${item.price}</div>
+    </div>
+  `).join('');
+  $('menuItems').innerHTML = itemsHtml;
+
+  const onitButton = $('onitBtn');
+  onitButton.disabled = !activeShop.onitEnabled;
+  onitButton.style.opacity = activeShop.onitEnabled ? '1' : '.55';
+  onitButton.title = activeShop.onitEnabled ? 'Ask Sage to negotiate' : 'This shop has ONIT turned off';
+  onitButton.textContent = activeShop.onitEnabled ? 'Ask ONIT AI to negotiate' : 'ONIT is unavailable';
+
+  $('sheetBackdrop').classList.add('open');
+  $('shopSheet').classList.add('open');
+};
+
+window.closeShopSheet = () => {
+  $('sheetBackdrop').classList.remove('open');
+  $('shopSheet').classList.remove('open');
+};
+
+/* =========================================================
+   SAGE NEGOTIATION FLOW (Calls Flask Backend)
+   ========================================================= */
+window.openSage = () => {
+  if (!activeShop) return;
+  lastBuyerQuestion = '';
+  setSageMode('ask');
+  $('sageOverlay').classList.add('open');
+  resetSage();
+};
+
+window.closeSage = () => {
+  $('sageOverlay').classList.remove('open');
+  clearInterval(pollInterval);
+};
+
+window.setSageMode = (mode) => {
+  sageMode = mode === 'negotiate' ? 'negotiate' : 'ask';
+  $('btnAsk').classList.toggle('active', sageMode === 'ask');
+  $('btnNegotiate').classList.toggle('active', sageMode === 'negotiate');
+  $('sageOfferWrapper').style.display = sageMode === 'ask' ? 'none' : 'flex';
+  $('sageQuestion').placeholder = sageMode === 'ask'
+    ? 'e.g. Can I get chai with bun?'
+    : 'e.g. Can I get 1kg rice?';
+  $('sagePrompt').textContent = sageMode === 'ask'
+    ? "Hi! I'm Sage, your AI shopping assistant. What can I get for you today?"
+    : "Tell Sage what you want and the price you'd like to pay.";
+  $('sageStatus').textContent = sageMode === 'ask' ? 'Ask a question' : 'Negotiate a price';
+};
+
+function resetSage(nextOffer, keepQuestion = false) {
+  $('sageStatus').textContent = sageMode === 'ask' ? 'Ask a question' : 'Negotiate a price';
+  $('sageQuote').textContent = '';
+  $('sageRing').classList.remove('busy');
+  $('sageInputs').style.display = 'flex';
+  $('sageModeToggle').style.display = 'flex';
+  $('sageQuestion').value = keepQuestion ? lastBuyerQuestion : '';
+  $('sageOffer').value = nextOffer === undefined ? '₹30' : nextOffer;
+  $('sageSendBtn').disabled = false;
+  $('sageSendBtn').style.display = '';
+  $('sageDecisionActions').style.display = 'none';
+  $('sageDecisionActions').innerHTML = '';
+  $('sageOfferWrapper').style.display = sageMode === 'ask' ? 'none' : 'flex';
+}
+
+let pollInterval = null;
+let currentCallId = null;
+let pendingDealPrice = '';
+let lastBuyerQuestion = '';
+let sageMode = 'ask';
+
+window.startNegotiation = async () => {
+  const q = $('sageQuestion').value.trim();
+  const offer = sageMode === 'ask' ? 'inquiry' : $('sageOffer').value.trim();
+  if (!q) return showSnack('Please type a question first.');
+  if (sageMode === 'negotiate' && !offer) return showSnack('Please enter an offer amount.');
+  lastBuyerQuestion = q;
+  clearInterval(pollInterval);
+
+  $('sageRing').classList.add('busy');
+  $('sageStatus').textContent = `Sage is contacting ${activeShop.name}...`;
+  $('sageQuote').textContent = '';
+  $('sageInputs').style.display = 'none';
+  $('sageModeToggle').style.display = 'none';
+  $('sageSendBtn').disabled = true;
+  $('sageDecisionActions').style.display = 'none';
+
+  try {
+    // 1. Send buyer offer to backend relay
+    const res = await fetch(`${backendUrl}/api/buyer_offer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shop_id: activeShop.id,
+        shop_name: activeShop.name,
+        question: q,
+        offer: offer
+      })
+    });
+
+    if (!res.ok) {
+      if (res.status === 403) throw new Error("Seller has disabled ONIT negotiations.");
+      throw new Error("Could not reach the seller's app.");
+    }
+
+    const data = await res.json();
+    currentCallId = data.call_id;
+
+    $('sageStatus').textContent = 'Waiting for the seller to reply...';
+
+    // 2. Poll status
+    let seconds = 0;
+    pollInterval = setInterval(async () => {
+      seconds++;
+      if (seconds > 45) {
+        clearInterval(pollInterval);
+        $('sageStatus').textContent = 'Seller did not respond in time.';
+        $('sageRing').classList.remove('busy');
+        setTimeout(resetSage, 3000);
+        return;
+      }
+
+      try {
+        const statusRes = await fetch(`${backendUrl}/api/status/${encodeURIComponent(activeShop.id)}`);
+        const statusData = await statusRes.json();
+
+        if (statusData.status === 'replied' && statusData.call_id === currentCallId) {
+          clearInterval(pollInterval);
+          handleSellerReply(statusData.seller_reply, offer);
+        }
+      } catch (e) {
+        console.warn("Polling error", e);
+      }
+    }, 2000);
+
+  } catch (err) {
+    showSnack(err.message);
+    $('sageStatus').textContent = err.message;
+    $('sageRing').classList.remove('busy');
+    setTimeout(resetSage, 3000);
+  }
+};
+
+function handleSellerReply(reply, originalOffer) {
+  $('sageRing').classList.remove('busy');
+  $('sageInputs').style.display = 'none';
+  $('sageModeToggle').style.display = 'none';
+
+  let title = '';
+  let summary = '';
+
+  // Create a flex container for buttons in the input section
+  const btnContainer = document.createElement('div');
+  btnContainer.className = 'sage-actions';
+
+  if (sageMode === 'ask') {
+    title = 'Seller replied';
+    if (reply === 'accept') {
+      summary = 'The seller said yes and is available.';
+    } else if (reply === 'decline') {
+      summary = 'The seller said this is not available.';
+    } else if (reply.startsWith('counter:')) {
+      summary = `The seller quoted ₹${reply.split(':')[1]}.`;
+    } else {
+      summary = reply;
+    }
+    btnContainer.innerHTML = `<button class="sage-btn-filled" onclick="closeSage()">OK, thanks!</button>`;
+  } else if (reply === 'accept') {
+    pendingDealPrice = originalOffer;
+    title = 'Offer accepted!';
+    summary = `The seller accepted your offer of ${originalOffer}.`;
+    btnContainer.innerHTML = `
+      <button class="sage-btn-outline" onclick="closeSage()">Not now</button>
+      <button class="sage-btn-filled" onclick="confirmBuyerDeal()">Deal confirmed</button>
+    `;
+  } else if (reply === 'decline') {
+    title = 'Seller declined';
+    summary = 'The seller declined your offer.';
+    btnContainer.innerHTML = `
+      <button class="sage-btn-outline" onclick="closeSage()">Close</button>
+      <button class="sage-btn-filled" onclick="resetSage('', true)">Change offer</button>
+    `;
+  } else if (reply.startsWith('counter:')) {
+    const cp = reply.split(':')[1];
+    pendingDealPrice = `₹${cp}`;
+    title = `Counter-offer: ₹${cp}`;
+    summary = `The seller counter-offered at ₹${cp}. Want to take it?`;
+    btnContainer.innerHTML = `
+      <button class="sage-btn-outline" onclick="resetSage('₹${cp}', true)">Counter again</button>
+      <button class="sage-btn-filled" onclick="confirmBuyerDeal()">Accept ₹${cp}</button>
+    `;
+  }
+
+  $('sageStatus').textContent = title;
+  $('sageQuote').textContent = summary;
+
+  const sageActions = $('sageDecisionActions');
+  sageActions.innerHTML = '';
+  sageActions.style.display = 'flex';
+  sageActions.appendChild(btnContainer);
+
+  // Speak the summary
+  if ('speechSynthesis' in window) {
+    const u = new SpeechSynthesisUtterance(summary);
+    u.rate = 0.95;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  }
+}
+
+window.confirmBuyerDeal = () => {
+  $('sageStatus').textContent = `Deal confirmed at ${pendingDealPrice}`;
+  $('sageQuote').textContent = `You agreed on ${pendingDealPrice}. The PaasMein app will handle the seller call.`;
+  $('sageInputs').style.display = 'none';
+  $('sageModeToggle').style.display = 'none';
+  if ('speechSynthesis' in window) {
+    const utterance = new SpeechSynthesisUtterance($('sageQuote').textContent);
+    speechSynthesis.cancel();
+    speechSynthesis.speak(utterance);
+  }
+};
+
+// Use a direct map preview link for demos; normal visits start with the wizard.
+if (showMapPreview) {
+  $('wizardOverlay').classList.add('hidden');
+  initMap();
+} else {
+  renderWizard();
+}
+</script>
+</body>
+</html>

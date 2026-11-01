@@ -26,8 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>PaasMein uses the camera to scan buyer and shop QR codes.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>PaasMein uses the microphone to hear your language choice and voice messages.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PaasMein lets you choose a shop photo to show customers.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>PaasMein uses your location to find nearby shops and save your shop address.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
