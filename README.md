@@ -3,13 +3,7 @@
 **A voice-first local marketplace that connects nearby buyers and merchants.** Meet Piku, choose a language, find a shop, and use ONIT to ask about products and negotiate directly.
 
 <p align="center">
-  <img src="screenshots/welcome.png" alt="PaasMein welcome screen with Piku" width="210" />
-  &nbsp;&nbsp;
-  <img src="screenshots/language-selection.png" alt="Choose a language" width="210" />
-  &nbsp;&nbsp;
-  <img src="screenshots/role-selection.png" alt="Choose buyer or seller" width="210" />
-  &nbsp;&nbsp;
-  <img src="screenshots/buyer-qr-login.png" alt="Buyer QR login screen" width="210" />
+  <img src="screenshots/paasmein-gallery.png" alt="PaasMein app gallery: welcome, language selection, buyer or seller choice, and buyer QR login" width="100%" />
 </p>
 
 ## What’s inside
